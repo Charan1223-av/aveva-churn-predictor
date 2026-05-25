@@ -1,0 +1,3 @@
+# Trained model artifacts will be saved here after running train.py
+# models/latest/pipeline.joblib  - sklearn Pipeline with preprocessor + XGBoost
+# models/latest/metadata.json    - version, metrics, feature list
