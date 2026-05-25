@@ -8,6 +8,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
 from sklearn.base import BaseEstimator, TransformerMixin
+from typing import List, Optional
 
 
 class OutlierClipper(BaseEstimator, TransformerMixin):
@@ -36,12 +37,30 @@ class OutlierClipper(BaseEstimator, TransformerMixin):
         return X.values
 
 
-def build_preprocessing_pipeline(config: dict) -> ColumnTransformer:
-    """Build the full ColumnTransformer preprocessing pipeline."""
-    num_features = [f for f in config["features"]["numerical"] if f]
-    low_card_cat = [f for f in config["features"]["categorical"] if f]
-    high_card_cat = config["features"].get("high_cardinality_categorical", [])
-    bool_features = [f for f in config["features"]["boolean"] if f]
+def build_preprocessing_pipeline(
+    config: dict,
+    available_columns: Optional[List[str]] = None,
+) -> ColumnTransformer:
+    """Build the full ColumnTransformer preprocessing pipeline.
+
+    Parameters
+    ----------
+    config : dict
+        Full project config.
+    available_columns : list, optional
+        If provided, only include feature columns that are present in this list.
+        This prevents KeyError when `country` or other high-cardinality columns
+        have already been dropped during prepare_data().
+    """
+    def _filter(cols):
+        if available_columns is None:
+            return [f for f in cols if f]
+        return [f for f in cols if f and f in available_columns]
+
+    num_features   = _filter(config["features"]["numerical"])
+    low_card_cat   = _filter(config["features"]["categorical"])
+    high_card_cat  = _filter(config["features"].get("high_cardinality_categorical", []))
+    bool_features  = _filter(config["features"]["boolean"])
 
     numerical_pipeline = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
