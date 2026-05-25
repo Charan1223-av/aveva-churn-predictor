@@ -1,12 +1,6 @@
 """
 Main training script.
 Run: python train.py
-
-This script will:
-1. Load all CSVs from data/raw/
-2. Build the feature store
-3. Train and evaluate XGBoost model
-4. Save model artifacts to models/latest/
 """
 import logging
 import sys
@@ -55,7 +49,6 @@ def main():
     Path(config["data"]["processed_path"]).mkdir(parents=True, exist_ok=True)
     feature_store.to_parquet(config["data"]["feature_store_path"], index=False)
     logger.info(f"Feature store saved: {feature_store.shape}")
-    logger.info(f"Columns: {list(feature_store.columns)}")
 
     # Step 3: Prepare X, y
     logger.info("Step 3/5: Preparing features and target...")
@@ -88,7 +81,11 @@ def main():
 
     # Step 5: Train
     logger.info("Step 5/5: Training model...")
-    preprocessor = build_preprocessing_pipeline(config)
+
+    # Build the preprocessor AFTER prepare_data so we only reference columns
+    # that are actually in X (e.g. 'country' was already dropped).
+    preprocessor = build_preprocessing_pipeline(config, available_columns=list(X_train.columns))
+
     algorithm = config["model"]["algorithm"]
     params = config["model"][algorithm]
 
