@@ -1,0 +1,7 @@
+# Place your raw CSV files here:
+# - dim_customer.csv
+# - fact_flex_allocation.csv
+# - fact_flex_consumption.csv
+# - fact_product_usage.csv
+# - fact_support_ticket.csv
+# - fact_customer_engagement.csv
