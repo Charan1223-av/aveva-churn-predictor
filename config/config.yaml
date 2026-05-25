@@ -1,0 +1,145 @@
+project:
+  name: aveva_churn_model
+  version: "1.0"
+  random_seed: 42
+
+data:
+  raw_path: data/raw/
+  processed_path: data/processed/
+  feature_store_path: data/processed/feature_store.parquet
+  snapshot_date: "2025-12-31"
+
+target:
+  column: renewal_status
+  binary_mapping:
+    Churned: 1
+    At Risk: 1
+    On Track: 0
+    Renewed: 0
+  positive_label: 1
+
+features:
+  drop_columns:
+    - customer_id
+    - customer_name
+    - renewal_status
+    - contract_start_date
+    - contract_end_date
+    - first_contract_date
+
+  categorical:
+    - industry_vertical
+    - region
+    - customer_tier
+    - customer_size
+    - allocation_type_last
+
+  high_cardinality_categorical:
+    - country
+
+  numerical:
+    - contract_duration_months
+    - contract_value_usd
+    - annual_recurring_revenue
+    - num_previous_renewals
+    - nps_score
+    - named_users_licensed
+    - days_until_contract_end
+    - customer_tenure_days
+    - contract_value_per_user
+    - avg_utilization_rate
+    - min_utilization_rate
+    - std_utilization_rate
+    - utilization_last
+    - utilization_trend_slope
+    - utilization_recency_ratio
+    - credits_expired_total
+    - credit_expiry_rate
+    - top_up_count
+    - top_up_total
+    - credits_remaining_last
+    - avg_monthly_credits
+    - std_monthly_credits
+    - consumption_trend_slope
+    - consumption_recency_ratio
+    - zero_consumption_months
+    - avg_distinct_users
+    - avg_products_used
+    - product_breadth_last
+    - active_users_trend
+    - avg_adoption_rate
+    - adoption_rate_last
+    - adoption_rate_trend
+    - module_adoption_last
+    - module_adoption_trend
+    - total_tickets
+    - p1_count
+    - p2_count
+    - sla_breach_rate
+    - avg_csat_score
+    - avg_sentiment_score
+    - credit_related_tickets
+    - p1p2_tickets_last3m
+    - avg_sentiment_last3m
+    - total_training_sessions
+    - qbr_attendance_rate
+    - avg_champion_score
+    - champion_score_last
+    - champion_score_trend
+    - days_since_last_interaction_last
+    - max_days_dark
+    - gone_dark_flag
+
+  boolean:
+    - is_multi_site
+
+splitting:
+  test_size: 0.2
+  val_size: 0.15
+  stratify: true
+
+model:
+  algorithm: xgboost
+  threshold: 0.45
+
+  xgboost:
+    n_estimators: 300
+    max_depth: 4
+    learning_rate: 0.05
+    subsample: 0.8
+    colsample_bytree: 0.8
+    scale_pos_weight: 3
+    eval_metric: aucpr
+
+  lgbm:
+    n_estimators: 300
+    max_depth: 4
+    learning_rate: 0.05
+    is_unbalance: true
+
+  logistic_regression:
+    C: 1.0
+    max_iter: 1000
+    class_weight: balanced
+
+cross_validation:
+  n_splits: 5
+  strategy: stratified_kfold
+
+optuna:
+  n_trials: 50
+  enabled: false
+
+mlflow:
+  tracking_uri: mlruns/
+  experiment_name: aveva_churn
+
+api:
+  host: 0.0.0.0
+  port: 8000
+  workers: 1
+
+monitoring:
+  drift_threshold: 0.1
+  performance_degradation_threshold: 0.05
+  retrain_trigger: monthly
