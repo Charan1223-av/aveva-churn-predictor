@@ -9,16 +9,14 @@ from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
-import yaml
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     roc_auc_score, average_precision_score, f1_score,
     precision_score, recall_score, classification_report,
-    confusion_matrix, precision_recall_curve
+    precision_recall_curve,
 )
 from sklearn.model_selection import StratifiedKFold, cross_validate
-from sklearn.pipeline import Pipeline
 
 import xgboost as xgb
 import lightgbm as lgb
@@ -43,7 +41,6 @@ class ChurnModelTrainer:
         drop_cols = [c for c in drop_cols if c in feature_store.columns]
         X = feature_store.drop(columns=drop_cols)
 
-        # Only keep columns defined in config
         all_feature_cols = (
             self.config["features"]["numerical"]
             + self.config["features"]["categorical"]
@@ -57,27 +54,39 @@ class ChurnModelTrainer:
         logger.info(f"Target distribution:\n{y.value_counts().to_string()}")
         return X, y
 
-    def _build_pipeline(self, preprocessor, algorithm: str, params: dict) -> ImbPipeline:
+    def _build_pipeline(self, preprocessor, algorithm: str, params: dict,
+                        n_minority: int = 10) -> ImbPipeline:
         seed = self.config["project"]["random_seed"]
 
+        # Build a clean copy of params — strip keys that we set explicitly below
+        clean_params = {k: v for k, v in params.items()}
+
         if algorithm == "xgboost":
+            # Remove eval_metric from params if present (we set it below explicitly
+            # only when it's NOT already there to avoid the duplicate-keyword error).
+            # Safest: always pop it, then add once.
+            clean_params.pop("eval_metric", None)
             base_model = xgb.XGBClassifier(
-                **params, random_state=seed, n_jobs=-1,
-                eval_metric="aucpr", verbosity=0
+                **clean_params,
+                random_state=seed,
+                n_jobs=-1,
+                eval_metric="aucpr",
+                verbosity=0,
             )
         elif algorithm == "lgbm":
-            base_model = lgb.LGBMClassifier(**params, random_state=seed, n_jobs=-1, verbose=-1)
+            base_model = lgb.LGBMClassifier(**clean_params, random_state=seed, n_jobs=-1, verbose=-1)
         else:
-            base_model = LogisticRegression(**params, random_state=seed)
+            base_model = LogisticRegression(**clean_params, random_state=seed)
 
         model = CalibratedClassifierCV(base_model, method="isotonic", cv=3)
 
-        n_samples = 10  # Will be updated at fit time
-        smote = SMOTE(random_state=seed, k_neighbors=min(3, max(1, n_samples - 1)))
+        # SMOTE k_neighbors must be < minority class size; use 1 as minimum safe value
+        k = max(1, min(3, n_minority - 1))
+        smote = SMOTE(random_state=seed, k_neighbors=k)
 
         return ImbPipeline([
             ("preprocessor", preprocessor),
-            ("smote", SMOTE(random_state=seed, k_neighbors=2)),
+            ("smote", smote),
             ("classifier", model),
         ])
 
@@ -86,10 +95,16 @@ class ChurnModelTrainer:
     ) -> Dict[str, float]:
         n_splits = min(self.config["cross_validation"]["n_splits"], y.value_counts().min())
         n_splits = max(n_splits, 2)
-        skf = StratifiedKFold(n_splits=n_splits, shuffle=True,
-                              random_state=self.config["project"]["random_seed"])
+        skf = StratifiedKFold(
+            n_splits=n_splits, shuffle=True,
+            random_state=self.config["project"]["random_seed"],
+        )
 
-        pipeline = self._build_pipeline(preprocessor, algorithm, params)
+        # Estimate minority size per fold for SMOTE
+        min_class_size = int(y.value_counts().min())
+        n_minority_per_fold = max(1, min_class_size - (min_class_size // n_splits))
+        pipeline = self._build_pipeline(preprocessor, algorithm, params,
+                                        n_minority=n_minority_per_fold)
 
         scoring = {
             "roc_auc": "roc_auc",
@@ -99,8 +114,10 @@ class ChurnModelTrainer:
         }
 
         try:
-            results = cross_validate(pipeline, X, y, cv=skf, scoring=scoring,
-                                     return_train_score=True, n_jobs=1)
+            results = cross_validate(
+                pipeline, X, y, cv=skf, scoring=scoring,
+                return_train_score=True, n_jobs=1,
+            )
             metrics = {
                 "cv_roc_auc_mean": float(results["test_roc_auc"].mean()),
                 "cv_roc_auc_std": float(results["test_roc_auc"].std()),
@@ -108,7 +125,9 @@ class ChurnModelTrainer:
                 "cv_f1_mean": float(results["test_f1"].mean()),
                 "cv_recall_mean": float(results["test_recall"].mean()),
                 "train_roc_auc_mean": float(results["train_roc_auc"].mean()),
-                "overfit_gap": float(results["train_roc_auc"].mean() - results["test_roc_auc"].mean()),
+                "overfit_gap": float(
+                    results["train_roc_auc"].mean() - results["test_roc_auc"].mean()
+                ),
             }
         except Exception as e:
             logger.warning(f"Cross-validation failed ({e}), using dummy metrics for small dataset.")
@@ -138,7 +157,8 @@ class ChurnModelTrainer:
         preprocessor, algorithm: str, params: dict,
         version: str = "v1.0",
     ) -> ImbPipeline:
-        pipeline = self._build_pipeline(preprocessor, algorithm, params)
+        n_minority = int(y_train.value_counts().min())
+        pipeline = self._build_pipeline(preprocessor, algorithm, params, n_minority=n_minority)
         pipeline.fit(X_train, y_train)
 
         y_prob = pipeline.predict_proba(X_test)[:, 1]
@@ -170,12 +190,11 @@ class ChurnModelTrainer:
         with open(version_dir / "metadata.json", "w") as f:
             json.dump(metadata, f, indent=2)
 
-        # Create latest symlink (copy on Windows)
+        # Copy to models/latest/ (Windows-safe — no symlinks needed)
+        import shutil
         latest_dir = self.output_dir / "latest"
         if latest_dir.exists():
-            import shutil
             shutil.rmtree(latest_dir)
-        import shutil
         shutil.copytree(version_dir, latest_dir)
 
         logger.info(f"Model saved to {version_dir} and copied to models/latest/")
