@@ -1,5 +1,6 @@
 """
 FastAPI application for churn prediction.
+Supports both training data and production data (without renewal_status).
 """
 import json
 import logging
@@ -137,7 +138,7 @@ async def predict_batch(request: BatchRequest):
 
 @app.get("/customers")
 async def list_customers():
-    """List all customers with their risk scores from the feature store."""
+    """List all customers with their risk scores from the feature store (training data)."""
     try:
         fs_path = Path("data/processed/feature_store.parquet")
         if not fs_path.exists():
@@ -169,6 +170,7 @@ async def list_customers():
                 "renewal_status": row.get("renewal_status", ""),
                 "churn_probability": round(prob, 4),
                 "risk_category": prob_to_risk(prob),
+                "source": "training",
             })
 
         return {"customers": results, "count": len(results)}
@@ -176,3 +178,82 @@ async def list_customers():
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/customers/production")
+async def list_production_customers():
+    """List production customers with predictions (no renewal_status)."""
+    try:
+        # Option 1: Read pre-computed predictions
+        pred_path = Path("data/production/predictions.csv")
+        if pred_path.exists():
+            df = pd.read_csv(pred_path)
+            results = df.to_dict(orient="records")
+            for r in results:
+                r["source"] = "production"
+                r["renewal_status"] = "Unknown (Predicted)"
+            return {"customers": results, "count": len(results)}
+
+        # Option 2: Score on-the-fly from production feature store
+        fs_path = Path("data/production/feature_store.parquet")
+        if not fs_path.exists():
+            raise HTTPException(
+                status_code=404,
+                detail="No production data found. Run: python scripts/generate_production_dataset.py && python predict_production.py"
+            )
+
+        fs = pd.read_parquet(fs_path)
+        config = model_state.get("config", {})
+        drop_cols = config.get("features", {}).get("drop_columns", []) + ["customer_name"]
+
+        results = []
+        for _, row in fs.iterrows():
+            cid = row.get("customer_id", "unknown")
+            feat_dict = row.drop(
+                labels=[c for c in drop_cols if c in row.index], errors="ignore"
+            ).to_dict()
+
+            prob = 0.0
+            if "pipeline" in model_state:
+                try:
+                    X = pd.DataFrame([feat_dict])
+                    prob = float(model_state["pipeline"].predict_proba(X)[0, 1])
+                except Exception:
+                    pass
+
+            results.append({
+                "customer_id": cid,
+                "customer_name": row.get("customer_name", ""),
+                "renewal_status": "Unknown (Predicted)",
+                "churn_probability": round(prob, 4),
+                "risk_category": prob_to_risk(prob),
+                "source": "production",
+            })
+
+        return {"customers": results, "count": len(results)}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/customers/all")
+async def list_all_customers():
+    """Combine training and production customers."""
+    training = []
+    production = []
+
+    try:
+        t = await list_customers()
+        training = t.get("customers", [])
+    except Exception:
+        pass
+
+    try:
+        p = await list_production_customers()
+        production = p.get("customers", [])
+    except Exception:
+        pass
+
+    combined = training + production
+    return {"customers": combined, "count": len(combined)}
