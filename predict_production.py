@@ -75,6 +75,11 @@ def main():
     feature_store = fs_builder.build()
     logger.info(f"Feature store shape: {feature_store.shape}")
 
+    # Save production feature store for dashboard deep-dive
+    prod_fs_path = Path("data/production/feature_store.parquet")
+    feature_store.to_parquet(prod_fs_path, index=False)
+    logger.info(f"Production feature store saved: {prod_fs_path}")
+
     # Step 4: Prepare features (same as training but WITHOUT target)
     customer_ids = feature_store["customer_id"].values
     customer_names = feature_store.get("customer_name", pd.Series([""] * len(feature_store))).values
@@ -144,8 +149,10 @@ def main():
             f"Score: {row['risk_score']:3d}% | {row['risk_category']}"
         )
 
-    logger.info(f"\n✅ Full results saved to: {output_path}")
+    logger.info(f"\n✅ Results saved to: {output_path}")
+    logger.info(f"✅ Feature store saved to: {prod_fs_path}")
     logger.info(f"🚀 View in dashboard: streamlit run dashboard/app.py")
+    logger.info(f"   → Navigate to '🚀 Production Predictions' page")
     logger.info("=" * 60)
 
 
