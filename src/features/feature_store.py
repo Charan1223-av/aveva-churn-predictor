@@ -1,5 +1,8 @@
 """
-Feature engineering: builds flat customer-level feature store from all 7 tables.
+Modified FeatureStore that supports BOTH training (with renewal_status)
+and production inference (without renewal_status).
+
+This replaces src/features/feature_store.py with backward-compatible changes.
 """
 import logging
 import numpy as np
@@ -42,6 +45,13 @@ class FeatureStore:
         # Fill NAs for customers with no tickets / no engagement data
         fs = fs.fillna(0)
         logger.info(f"Feature store shape: {fs.shape}")
+
+        # Log whether this is training or production mode
+        if "renewal_status" in fs.columns:
+            logger.info("Mode: TRAINING (renewal_status present)")
+        else:
+            logger.info("Mode: PRODUCTION/INFERENCE (renewal_status NOT present)")
+
         return fs
 
     def _base_customer_features(self) -> pd.DataFrame:
@@ -50,14 +60,19 @@ class FeatureStore:
         df["customer_tenure_days"] = (SNAPSHOT_DATE - df["first_contract_date"]).dt.days
         df["contract_value_per_user"] = df["contract_value_usd"] / df["named_users_licensed"].clip(lower=1)
         df["is_multi_site"] = df["is_multi_site"].map({"True": 1, "False": 0, True: 1, False: 0}).fillna(0).astype(int)
+
         keep = [
             "customer_id", "customer_name", "industry_vertical", "region", "country",
             "customer_tier", "customer_size", "contract_duration_months",
             "contract_value_usd", "annual_recurring_revenue", "num_previous_renewals",
             "nps_score", "is_multi_site", "named_users_licensed",
             "days_until_contract_end", "customer_tenure_days", "contract_value_per_user",
-            "renewal_status",
         ]
+
+        # Include renewal_status ONLY if present (training mode)
+        if "renewal_status" in df.columns:
+            keep.append("renewal_status")
+
         return df[[c for c in keep if c in df.columns]]
 
     def _allocation_features(self) -> pd.DataFrame:

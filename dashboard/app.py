@@ -1,5 +1,6 @@
 """
 Streamlit Dashboard for AVEVA Churn Intelligence.
+Supports both training data and production data (without renewal_status).
 Run: streamlit run dashboard/app.py
 """
 import json
@@ -38,6 +39,24 @@ def load_feature_store() -> pd.DataFrame:
     return pd.DataFrame()
 
 
+@st.cache_data(ttl=60)
+def load_production_predictions() -> pd.DataFrame:
+    """Load production predictions CSV."""
+    path = Path("data/production/predictions.csv")
+    if path.exists():
+        return pd.read_csv(path)
+    return pd.DataFrame()
+
+
+@st.cache_data(ttl=60)
+def load_production_feature_store() -> pd.DataFrame:
+    """Load production feature store (built by predict_production.py)."""
+    path = Path("data/production/feature_store.parquet")
+    if path.exists():
+        return pd.read_parquet(path)
+    return pd.DataFrame()
+
+
 def check_api_health() -> bool:
     try:
         r = requests.get(f"{API_URL}/health", timeout=3)
@@ -49,6 +68,16 @@ def check_api_health() -> bool:
 def get_all_predictions() -> list:
     try:
         r = requests.get(f"{API_URL}/customers", timeout=10)
+        if r.status_code == 200:
+            return r.json().get("customers", [])
+    except Exception:
+        pass
+    return []
+
+
+def get_production_predictions() -> list:
+    try:
+        r = requests.get(f"{API_URL}/customers/production", timeout=10)
         if r.status_code == 200:
             return r.json().get("customers", [])
     except Exception:
@@ -83,15 +112,17 @@ with st.sidebar:
     st.markdown("---")
     page = st.radio(
         "Navigation",
-        ["📊 Overview", "🔮 Live Predict", "📈 Customer Deep Dive", "⚙️ Model Info"],
+        ["📊 Overview", "🚀 Production Predictions", "🔮 Live Predict",
+         "📈 Customer Deep Dive", "⚙️ Model Info"],
     )
 
 
 fs = load_feature_store()
+prod_preds = load_production_predictions()
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 1 — OVERVIEW
+# PAGE 1 — OVERVIEW (Training Data)
 # ══════════════════════════════════════════════════════
 if page == "📊 Overview":
     st.title("📊 AVEVA Flex Credit — Churn Intelligence")
@@ -191,35 +222,186 @@ if page == "📊 Overview":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 2 — LIVE PREDICT
+# PAGE 2 — PRODUCTION PREDICTIONS (NEW)
+# ══════════════════════════════════════════════════════
+elif page == "🚀 Production Predictions":
+    st.title("🚀 Production Predictions — New Customers")
+    st.markdown("Churn predictions for customers **without known renewal_status**.")
+    st.markdown("---")
+
+    if prod_preds.empty:
+        st.warning("⚠️ No production predictions found.")
+        st.info("""
+        **To generate production predictions:**
+        ```bash
+        # Step 1: Generate synthetic production data
+        python scripts/generate_production_dataset.py
+
+        # Step 2: Run inference
+        python predict_production.py
+        ```
+        This will create `data/production/predictions.csv` which this page reads.
+        """)
+        st.stop()
+
+    # KPI Metrics
+    total = len(prod_preds)
+    critical = len(prod_preds[prod_preds["risk_category"] == "Critical"])
+    high = len(prod_preds[prod_preds["risk_category"] == "High"])
+    medium = len(prod_preds[prod_preds["risk_category"] == "Medium"])
+    low = len(prod_preds[prod_preds["risk_category"] == "Low"])
+    at_risk = len(prod_preds[prod_preds.get("is_at_risk", prod_preds["churn_probability"] >= 0.45) == True])
+
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Total Scored", total)
+    c2.metric("🔴 Critical", critical)
+    c3.metric("🟠 High", high)
+    c4.metric("🟡 Medium", medium)
+    c5.metric("🟢 Low", low)
+
+    st.markdown("---")
+
+    # Risk Distribution Chart
+    col1, col2 = st.columns(2)
+
+    with col1:
+        risk_counts = prod_preds["risk_category"].value_counts().reset_index()
+        risk_counts.columns = ["Risk Category", "Count"]
+        fig = px.pie(
+            risk_counts, values="Count", names="Risk Category",
+            color="Risk Category",
+            color_discrete_map={
+                "Critical": "#ef4444", "High": "#f97316",
+                "Medium": "#eab308", "Low": "#22c55e",
+            },
+            title="Production Customers — Risk Distribution",
+            hole=0.4,
+        )
+        st.plotly_chart(fig, use_container_width=True)
+
+    with col2:
+        fig2 = px.histogram(
+            prod_preds, x="churn_probability", nbins=20,
+            color_discrete_sequence=["#3b82f6"],
+            title="Churn Probability Distribution",
+            labels={"churn_probability": "Churn Probability"},
+        )
+        fig2.add_vline(x=0.45, line_dash="dash", line_color="red",
+                       annotation_text="Threshold (0.45)")
+        st.plotly_chart(fig2, use_container_width=True)
+
+    st.markdown("---")
+
+    # Full Customer Table
+    st.subheader("📋 All Production Customers — Ranked by Risk")
+
+    display_df = prod_preds.sort_values("churn_probability", ascending=False).copy()
+    if "risk_score" not in display_df.columns:
+        display_df["risk_score"] = (display_df["churn_probability"] * 100).astype(int)
+
+    def color_risk(val):
+        colors = {
+            "Critical": "background-color: #fee2e2",
+            "High": "background-color: #ffedd5",
+            "Medium": "background-color: #fef9c3",
+            "Low": "background-color: #dcfce7",
+        }
+        return colors.get(val, "")
+
+    display_cols = [c for c in ["customer_id", "customer_name", "churn_probability",
+                                 "risk_score", "risk_category", "is_at_risk"] if c in display_df.columns]
+    styled = display_df[display_cols].style.applymap(color_risk, subset=["risk_category"])
+    st.dataframe(styled, use_container_width=True, height=500)
+
+    st.markdown("---")
+
+    # Top 10 At-Risk
+    st.subheader("🚨 Top 10 Highest Risk — Immediate Action Required")
+    top10 = display_df.head(10)
+    for _, row in top10.iterrows():
+        prob = row["churn_probability"]
+        risk = row["risk_category"]
+        color = {"Critical": "🔴", "High": "🟠", "Medium": "🟡", "Low": "🟢"}.get(risk, "⚪")
+        st.markdown(
+            f"{color} **{row['customer_id']}** — {row.get('customer_name', '')} | "
+            f"Risk Score: **{int(prob*100)}%** | Category: **{risk}**"
+        )
+
+    st.markdown("---")
+
+    # Recommended Actions
+    st.subheader("📌 Recommended Actions by Segment")
+    col_a, col_b, col_c = st.columns(3)
+    with col_a:
+        st.error(f"**🔴 Critical + High Risk ({critical + high} customers)**")
+        st.markdown("""
+        - Executive escalation within 48 hours
+        - 1:1 CSM outreach
+        - Offer custom retention package
+        - Schedule emergency QBR
+        """)
+    with col_b:
+        st.warning(f"**🟡 Medium Risk ({medium} customers)**")
+        st.markdown("""
+        - Proactive check-in within 1 week
+        - Share product roadmap
+        - Invite to training sessions
+        - Ensure QBR is scheduled
+        """)
+    with col_c:
+        st.success(f"**🟢 Low Risk ({low} customers)**")
+        st.markdown("""
+        - Monthly nurture cadence
+        - Identify upsell opportunities
+        - Request testimonials/referrals
+        - Monitor for changes
+        """)
+
+
+# ══════════════════════════════════════════════════════
+# PAGE 3 — LIVE PREDICT
 # ══════════════════════════════════════════════════════
 elif page == "🔮 Live Predict":
     st.title("🔮 Live Churn Prediction")
-    st.markdown("Select a customer from the feature store and get an instant prediction.")
+    st.markdown("Select a customer from training OR production data and get an instant prediction.")
     st.markdown("---")
 
-    if fs.empty:
-        st.warning("No feature store found. Run `python train.py` first.")
+    # Allow selecting from both training and production feature stores
+    data_source = st.radio("Data Source", ["Training Data", "Production Data"], horizontal=True)
+
+    if data_source == "Training Data":
+        active_fs = fs
+    else:
+        # Try to load production feature store
+        prod_fs_path = Path("data/production/feature_store.parquet")
+        if prod_fs_path.exists():
+            active_fs = pd.read_parquet(prod_fs_path)
+        else:
+            # Fall back: build from CSVs if available
+            active_fs = pd.DataFrame()
+
+    if active_fs.empty:
+        st.warning(f"No {data_source.lower()} found. Run the appropriate pipeline first.")
         st.stop()
     if not api_ok:
         st.error("API is offline. Start it: `python -m uvicorn api.main:app --port 8000`")
         st.stop()
 
-    customer_options = fs["customer_id"].tolist() if "customer_id" in fs.columns else []
+    customer_options = active_fs["customer_id"].tolist() if "customer_id" in active_fs.columns else []
     if not customer_options:
         st.warning("No customers in feature store.")
         st.stop()
 
     def fmt(cid):
         name = ""
-        if "customer_name" in fs.columns:
-            row = fs[fs["customer_id"] == cid]
+        if "customer_name" in active_fs.columns:
+            row = active_fs[active_fs["customer_id"] == cid]
             if not row.empty:
                 name = row.iloc[0].get("customer_name", "")
         return f"{cid} — {name}" if name else cid
 
     selected = st.selectbox("Select Customer", customer_options, format_func=fmt)
-    row = fs[fs["customer_id"] == selected].iloc[0]
+    row = active_fs[active_fs["customer_id"] == selected].iloc[0]
 
     drop_cols = ["customer_id", "customer_name", "renewal_status",
                  "contract_start_date", "contract_end_date", "first_contract_date"]
@@ -241,7 +423,14 @@ elif page == "🔮 Live Predict":
                         "customer_tier", "renewal_status", "nps_score", "contract_value_usd"]
         for c in profile_cols:
             if c in row.index and not pd.isna(row[c]):
-                st.write(f"**{c.replace('_', ' ').title()}:** {row[c]}")
+                label = c.replace('_', ' ').title()
+                value = row[c]
+                if c == "renewal_status":
+                    st.write(f"**{label}:** {value}")
+                else:
+                    st.write(f"**{label}:** {value}")
+            elif c == "renewal_status" and c not in row.index:
+                st.write("**Renewal Status:** 🔮 Unknown (To Be Predicted)")
 
     with col2:
         if st.button("🚀 Predict Churn Risk", type="primary"):
@@ -284,21 +473,39 @@ elif page == "🔮 Live Predict":
                     st.success("✅ Customer shows healthy engagement signals.")
 
 
-# ══════════════════════════════════════════════════════
-# PAGE 3 — CUSTOMER DEEP DIVE
+# ════════���═════════════════════════════════════════════
+# PAGE 4 — CUSTOMER DEEP DIVE
 # ══════════════════════════════════════════════════════
 elif page == "📈 Customer Deep Dive":
     st.title("📈 Customer Deep Dive")
     st.markdown("---")
 
-    if fs.empty:
-        st.warning("No feature store found. Run `python train.py` first.")
+    # Allow selecting from both sources
+    data_source = st.radio("Data Source", ["Training Data", "Production Data"], horizontal=True)
+
+    if data_source == "Training Data":
+        active_fs = fs
+    else:
+        prod_fs_path = Path("data/production/feature_store.parquet")
+        if prod_fs_path.exists():
+            active_fs = pd.read_parquet(prod_fs_path)
+        else:
+            active_fs = pd.DataFrame()
+
+    if active_fs.empty:
+        st.warning(f"No {data_source.lower()} found. Run the appropriate pipeline first.")
         st.stop()
 
-    selected = st.selectbox("Select Customer", fs["customer_id"].tolist())
-    row = fs[fs["customer_id"] == selected].iloc[0]
+    selected = st.selectbox("Select Customer", active_fs["customer_id"].tolist())
+    row = active_fs[active_fs["customer_id"] == selected].iloc[0]
     name = row.get("customer_name", selected) if "customer_name" in row.index else selected
     st.subheader(f"Customer: {name}")
+
+    # Show renewal status or prediction
+    if "renewal_status" in row.index and row["renewal_status"]:
+        st.info(f"**Known Status:** {row['renewal_status']}")
+    else:
+        st.warning("**Status:** Unknown — Use Live Predict to generate risk score")
 
     tab1, tab2, tab3, tab4 = st.tabs(["💳 Credits", "👥 Engagement", "🎫 Support", "📦 Product"])
 
@@ -358,7 +565,7 @@ elif page == "📈 Customer Deep Dive":
 
 
 # ══════════════════════════════════════════════════════
-# PAGE 4 — MODEL INFO
+# PAGE 5 — MODEL INFO
 # ══════════════════════════════════════════════════════
 elif page == "⚙️ Model Info":
     st.title("⚙️ Model Information")
@@ -402,6 +609,23 @@ elif page == "⚙️ Model Info":
         if features:
             st.subheader(f"Features Used ({len(features)})")
             st.dataframe(pd.DataFrame({"Feature": features}), use_container_width=True, height=300)
+
+        # Production data status
+        st.markdown("---")
+        st.subheader("📡 Data Sources Status")
+        col_a, col_b = st.columns(2)
+        with col_a:
+            train_exists = Path("data/processed/feature_store.parquet").exists()
+            if train_exists:
+                st.success("✅ Training Feature Store available")
+            else:
+                st.error("❌ Training Feature Store missing — run `python train.py`")
+        with col_b:
+            prod_exists = Path("data/production/predictions.csv").exists()
+            if prod_exists:
+                st.success("✅ Production Predictions available")
+            else:
+                st.error("❌ Production Predictions missing — run `python predict_production.py`")
     else:
         st.warning("No trained model found. Run `python train.py` first.")
         st.info("After training, this page will show model metrics, feature list, and performance charts.")
