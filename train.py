@@ -79,25 +79,23 @@ def main():
 
     logger.info(f"Train: {len(X_train)}, Test: {len(X_test)}")
 
-    # Step 5: Train
-    logger.info("Step 5/5: Training model...")
+    # Step 5: Compare + train
+    logger.info("Step 5/5: Comparing candidate models and training final model...")
 
     # Build the preprocessor AFTER prepare_data so we only reference columns
     # that are actually in X (e.g. 'country' was already dropped).
     preprocessor = build_preprocessing_pipeline(config, available_columns=list(X_train.columns))
 
-    algorithm = config["model"]["algorithm"]
-    params = config["model"][algorithm]
-
-    cv_metrics = trainer.cross_validate_model(X_train, y_train, preprocessor, algorithm, params)
-    logger.info(
-        f"CV ROC-AUC: {cv_metrics.get('cv_roc_auc_mean', 0):.4f} "
-        f"(+/- {cv_metrics.get('cv_roc_auc_std', 0):.4f})"
+    algorithm, params, comparison_df = trainer.compare_models(
+        X_train, y_train, X_test, y_test, preprocessor
     )
+    logger.info(f"Model comparison complete. Best model: {algorithm}")
+    logger.info(f"\n{comparison_df[['algorithm', 'roc_auc', 'f1', 'precision', 'recall', 'inference_ms_per_sample']].to_string(index=False)}")
 
     trainer.train_final_model(
         X_train, y_train, X_test, y_test,
         preprocessor, algorithm, params, version="v1.0",
+        model_comparison=comparison_df,
     )
 
     logger.info("=" * 60)

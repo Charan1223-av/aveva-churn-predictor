@@ -38,17 +38,14 @@ def generate_customer_profile(i: int, risk_level: str) -> dict:
 
     # Base contract info
     if risk_level == "high":
-        nps = np.random.uniform(2, 5)
         contract_value = np.random.uniform(50000, 300000)
         num_renewals = np.random.randint(0, 2)
         tenure_days = np.random.randint(180, 600)
     elif risk_level == "medium":
-        nps = np.random.uniform(5, 7)
         contract_value = np.random.uniform(100000, 500000)
         num_renewals = np.random.randint(1, 4)
         tenure_days = np.random.randint(365, 1200)
     else:  # low risk
-        nps = np.random.uniform(7, 10)
         contract_value = np.random.uniform(200000, 800000)
         num_renewals = np.random.randint(3, 8)
         tenure_days = np.random.randint(730, 2500)
@@ -69,7 +66,6 @@ def generate_customer_profile(i: int, risk_level: str) -> dict:
         "contract_value_usd": round(contract_value, 2),
         "annual_recurring_revenue": round(contract_value / (contract_duration / 12), 2),
         "num_previous_renewals": num_renewals,
-        "nps_score": round(nps, 1),
         "is_multi_site": random.choice([True, False]),
         "named_users_licensed": named_users,
         "contract_start_date": pd.Timestamp("2024-06-01"),
@@ -237,23 +233,19 @@ def generate_engagement_data(customer_id: str, risk_level: str, months: int = 12
         if risk_level == "high":
             champion_score = max(0, 3 - m * 0.2 + np.random.uniform(-0.5, 0.5))
             days_since = min(90, 10 + m * 5 + np.random.randint(0, 10))
-            training = 0 if random.random() < 0.7 else 1
             qbr = random.random() < 0.2
         elif risk_level == "medium":
             champion_score = max(0, 5 + np.random.uniform(-1, 1))
             days_since = np.random.randint(5, 30)
-            training = 1 if random.random() < 0.4 else 0
             qbr = random.random() < 0.5
         else:
             champion_score = max(0, 7 + np.random.uniform(-1, 1.5))
             days_since = np.random.randint(1, 15)
-            training = 1 if random.random() < 0.7 else 0
             qbr = random.random() < 0.85
 
         rows.append({
             "customer_id": customer_id,
             "engagement_month": base_date + pd.DateOffset(months=m),
-            "training_sessions_attended": training,
             "qbr_participation": qbr,
             "executive_sponsor_engaged": random.random() < (0.2 if risk_level == "high" else 0.7),
             "documentation_page_views": np.random.randint(0, 10) if risk_level == "high" else np.random.randint(10, 100),

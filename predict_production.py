@@ -88,9 +88,16 @@ def main():
     drop_cols = config["features"]["drop_columns"] + ["customer_name", "country"]
     drop_cols = [c for c in drop_cols if c in feature_store.columns]
     X = feature_store.drop(columns=[c for c in drop_cols if c in feature_store.columns], errors="ignore")
+    X = X[[c for c in X.columns if "nps" not in c.lower() and "training" not in c.lower()]]
 
     # Keep only columns the model was trained on
     trained_features = metadata["features"]
+    excluded_trained = [c for c in trained_features if "nps" in c.lower() or "training" in c.lower()]
+    if excluded_trained:
+        logger.warning(
+            "Loaded model still expects excluded features (NPS/training). "
+            "Retrain with updated pipeline to fully remove them."
+        )
     available_features = [c for c in trained_features if c in X.columns]
     missing_features = [c for c in trained_features if c not in X.columns]
 

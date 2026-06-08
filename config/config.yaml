@@ -42,18 +42,22 @@ features:
     - contract_value_usd
     - annual_recurring_revenue
     - num_previous_renewals
-    - nps_score
     - named_users_licensed
     - days_until_contract_end
     - customer_tenure_days
     - contract_value_per_user
+    - utilization_rate_period
     - avg_utilization_rate
     - min_utilization_rate
     - std_utilization_rate
     - utilization_last
     - utilization_trend_slope
     - utilization_recency_ratio
+    - utilization_rate_period_roll3m
+    - utilization_rate_period_roll6m
+    - credits_expired
     - credits_expired_total
+    - credits_expired_rate_change
     - credit_expiry_rate
     - top_up_count
     - top_up_total
@@ -65,23 +69,28 @@ features:
     - zero_consumption_months
     - avg_distinct_users
     - avg_products_used
+    - avg_session_duration_min
     - product_breadth_last
     - active_users_trend
     - avg_adoption_rate
     - adoption_rate_last
     - adoption_rate_trend
+    - module_adoption_pct
     - module_adoption_last
     - module_adoption_trend
+    - usage_trend_30d
     - total_tickets
     - p1_count
     - p2_count
     - sla_breach_rate
+    - resolution_time_hours
+    - escalation_count
+    - sla_met
     - avg_csat_score
     - avg_sentiment_score
     - credit_related_tickets
     - p1p2_tickets_last3m
     - avg_sentiment_last3m
-    - total_training_sessions
     - qbr_attendance_rate
     - avg_champion_score
     - champion_score_last
@@ -89,6 +98,8 @@ features:
     - days_since_last_interaction_last
     - max_days_dark
     - gone_dark_flag
+    - utilization_x_module_adoption
+    - escalation_x_sla_met
 
   boolean:
     - is_multi_site
@@ -101,6 +112,11 @@ splitting:
 model:
   algorithm: xgboost
   threshold: 0.45
+  comparison_algorithms:
+    - logistic_regression
+    - random_forest
+    - xgboost
+    - lgbm
 
   xgboost:
     n_estimators: 300
@@ -121,6 +137,12 @@ model:
     C: 1.0
     max_iter: 1000
     class_weight: balanced
+
+  random_forest:
+    n_estimators: 300
+    max_depth: 8
+    min_samples_leaf: 2
+    class_weight: balanced_subsample
 
 cross_validation:
   n_splits: 5

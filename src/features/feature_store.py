@@ -44,6 +44,10 @@ class FeatureStore:
 
         # Fill NAs for customers with no tickets / no engagement data
         fs = fs.fillna(0)
+        fs["utilization_x_module_adoption"] = (
+            fs.get("utilization_rate_period", 0) * fs.get("module_adoption_pct", 0)
+        )
+        fs["escalation_x_sla_met"] = fs.get("escalation_count", 0) * fs.get("sla_met", 0)
         logger.info(f"Feature store shape: {fs.shape}")
 
         # Log whether this is training or production mode
@@ -65,7 +69,7 @@ class FeatureStore:
             "customer_id", "customer_name", "industry_vertical", "region", "country",
             "customer_tier", "customer_size", "contract_duration_months",
             "contract_value_usd", "annual_recurring_revenue", "num_previous_renewals",
-            "nps_score", "is_multi_site", "named_users_licensed",
+            "is_multi_site", "named_users_licensed",
             "days_until_contract_end", "customer_tenure_days", "contract_value_per_user",
         ]
 
@@ -80,9 +84,11 @@ class FeatureStore:
         df = df.sort_values(["customer_id", "allocation_period"])
 
         agg = df.groupby("customer_id").agg(
+            utilization_rate_period=("utilization_rate_period", "mean"),
             avg_utilization_rate=("utilization_rate_period", "mean"),
             min_utilization_rate=("utilization_rate_period", "min"),
             std_utilization_rate=("utilization_rate_period", "std"),
+            credits_expired=("credits_expired", "sum"),
             credits_expired_total=("credits_expired", "sum"),
             credits_rolled_over_total=("credits_rolled_over", "sum"),
             top_up_count=("top_up_credits", lambda x: (x > 0).sum()),
@@ -107,6 +113,32 @@ class FeatureStore:
         rr = (df.groupby("customer_id").apply(recency_ratio)
                 .reset_index().rename(columns={0: "utilization_recency_ratio"}))
         agg = agg.merge(rr, on="customer_id", how="left")
+
+        roll3 = (
+            df.groupby("customer_id")["utilization_rate_period"]
+            .apply(lambda s: s.rolling(window=3, min_periods=1).mean().iloc[-1])
+            .reset_index()
+            .rename(columns={"utilization_rate_period": "utilization_rate_period_roll3m"})
+        )
+        roll6 = (
+            df.groupby("customer_id")["utilization_rate_period"]
+            .apply(lambda s: s.rolling(window=6, min_periods=1).mean().iloc[-1])
+            .reset_index()
+            .rename(columns={"utilization_rate_period": "utilization_rate_period_roll6m"})
+        )
+        roc = (
+            df.groupby("customer_id")["credits_expired"]
+            .apply(
+                lambda s: 0.0
+                if len(s) < 2
+                else float((s.iloc[-1] - s.iloc[0]) / (abs(s.iloc[0]) + 1e-9))
+            )
+            .reset_index()
+            .rename(columns={"credits_expired": "credits_expired_rate_change"})
+        )
+        agg = agg.merge(roll3, on="customer_id", how="left")
+        agg = agg.merge(roll6, on="customer_id", how="left")
+        agg = agg.merge(roc, on="customer_id", how="left")
         agg["credit_expiry_rate"] = agg["credits_expired_total"] / agg["total_credits_purchased"].clip(lower=1)
         return agg
 
@@ -119,6 +151,10 @@ class FeatureStore:
             distinct_users=("distinct_users", "sum"),
             products_used=("product_name", "nunique"),
             error_count=("error_count", "sum"),
+            avg_session_duration_min=(
+                "avg_session_duration_min",
+                "mean",
+            ) if "avg_session_duration_min" in df.columns else ("credits_consumed", lambda x: 0.0),
         ).reset_index()
 
         agg = monthly.groupby("customer_id").agg(
@@ -128,6 +164,7 @@ class FeatureStore:
             avg_products_used=("products_used", "mean"),
             product_breadth_last=("products_used", "last"),
             total_errors=("error_count", "sum"),
+            avg_session_duration_min=("avg_session_duration_min", "mean"),
             zero_consumption_months=("total_credits", lambda x: (x == 0).sum()),
         ).reset_index()
 
@@ -158,14 +195,18 @@ class FeatureStore:
 
         monthly = df.groupby(["customer_id", "snapshot_month"]).agg(
             avg_adoption_rate=("adoption_rate", "mean"),
-            avg_module_adoption=("module_adoption_pct", "mean"),
+            module_adoption_pct=("module_adoption_pct", "mean"),
+            usage_trend_30d=("usage_trend_30d", "last") if "usage_trend_30d" in df.columns else ("adoption_rate", lambda x: "Stable"),
         ).reset_index()
+        trend_map = {"Declining": 0, "Stable": 1, "Growing": 2, "New": 3}
+        monthly["usage_trend_30d"] = monthly["usage_trend_30d"].map(trend_map).fillna(1).astype(int)
 
         agg = monthly.groupby("customer_id").agg(
             avg_adoption_rate=("avg_adoption_rate", "mean"),
-            avg_module_adoption=("avg_module_adoption", "mean"),
+            module_adoption_pct=("module_adoption_pct", "mean"),
             adoption_rate_last=("avg_adoption_rate", "last"),
-            module_adoption_last=("avg_module_adoption", "last"),
+            module_adoption_last=("module_adoption_pct", "last"),
+            usage_trend_30d=("usage_trend_30d", "last"),
         ).reset_index()
 
         at = (monthly.groupby("customer_id")
@@ -174,15 +215,10 @@ class FeatureStore:
         agg = agg.merge(at, on="customer_id", how="left")
 
         mt = (monthly.groupby("customer_id")
-                     .apply(lambda g: _trend_slope(g["avg_module_adoption"]))
+                     .apply(lambda g: _trend_slope(g["module_adoption_pct"]))
                      .reset_index().rename(columns={0: "module_adoption_trend"}))
         agg = agg.merge(mt, on="customer_id", how="left")
-
-        last = df.sort_values("snapshot_month").groupby("customer_id").last().reset_index()
-        dec = last.groupby("customer_id").apply(
-            lambda g: 1 if (g.get("usage_trend_30d", pd.Series([""])) == "Declining").any() else 0
-        ).reset_index().rename(columns={0: "is_declining_last"})
-        agg = agg.merge(dec, on="customer_id", how="left")
+        agg["is_declining_last"] = (agg["usage_trend_30d"] == 0).astype(int)
         return agg
 
     def _support_features(self) -> pd.DataFrame:
@@ -190,6 +226,10 @@ class FeatureStore:
         df = df.sort_values(["customer_id", "created_date"])
         df["sla_met"] = df["sla_met"].map({"True": True, "False": False, True: True, False: False})
         df["is_credit_related"] = df["is_credit_related"].map({"True": True, "False": False, True: True, False: False})
+        if "resolution_time_hours" not in df.columns:
+            resolved = pd.to_datetime(df.get("resolved_date"), errors="coerce")
+            created = pd.to_datetime(df.get("created_date"), errors="coerce")
+            df["resolution_time_hours"] = (resolved - created).dt.total_seconds().div(3600).fillna(0)
 
         cutoff_3m = SNAPSHOT_DATE - pd.Timedelta(days=90)
         df_recent = df[df["created_date"] >= cutoff_3m]
@@ -199,7 +239,10 @@ class FeatureStore:
             p1_count=("severity", lambda x: (x == "P1").sum()),
             p2_count=("severity", lambda x: (x == "P2").sum()),
             sla_breach_rate=("sla_met", lambda x: (~x).mean()),
+            escalation_count=("escalation_count", "sum"),
             total_escalations=("escalation_count", "sum"),
+            sla_met=("sla_met", lambda x: x.astype(bool).mean()),
+            resolution_time_hours=("resolution_time_hours", "mean"),
             avg_csat_score=("csat_score", "mean"),
             avg_sentiment_score=("sentiment_score", "mean"),
             credit_related_tickets=("is_credit_related", lambda x: x.astype(bool).sum()),
@@ -222,7 +265,6 @@ class FeatureStore:
         df["executive_sponsor_engaged"] = df["executive_sponsor_engaged"].map({"True": True, "False": False, True: True, False: False})
 
         agg = df.groupby("customer_id").agg(
-            total_training_sessions=("training_sessions_attended", "sum"),
             qbr_attendance_rate=("qbr_participation", lambda x: x.astype(bool).mean()),
             exec_sponsor_rate=("executive_sponsor_engaged", lambda x: x.astype(bool).mean()),
             avg_doc_views=("documentation_page_views", "mean"),

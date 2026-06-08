@@ -131,6 +131,65 @@ curl http://localhost:8000/health
 
 ---
 
+## 🧠 Updated Training Architecture
+
+- Feature store now prioritizes business-critical retention signals:
+  - `utilization_rate_period`, `credits_expired`, `avg_session_duration_min`
+  - `module_adoption_pct`, `usage_trend_30d`
+  - `resolution_time_hours`, `escalation_count`, `sla_met`
+- Added feature engineering enhancements:
+  - Rolling utilization windows (`utilization_rate_period_roll3m`, `utilization_rate_period_roll6m`)
+  - Credit expiry rate-of-change (`credits_expired_rate_change`)
+  - Interaction features (`utilization_x_module_adoption`, `escalation_x_sla_met`)
+  - Ordinal encoding for usage trend (`Declining=0`, `Stable=1`, `Growing=2`, `New=3`)
+- Model training now compares:
+  - Logistic Regression
+  - Random Forest
+  - XGBoost
+  - LightGBM
+- Selection criteria include ROC-AUC, F1, precision/recall, explainability score, and inference speed.
+- Validation uses stratified K-fold with SMOTE in the training pipeline.
+
+## 🔍 Explainability Artifacts
+
+Training exports in `models/v1.0/` (and `models/latest/`):
+
+- `model_comparison.csv`
+- `feature_importance_rankings.csv`
+- `permutation_importance.csv`
+- `tree_feature_importance.csv`
+- `correlation_importance.csv`
+- `shap_feature_importance.csv` (if SHAP run succeeds)
+- `shap_summary.png` (if SHAP run succeeds)
+- `prioritized_feature_summary.json`
+
+## 🚫 Excluded Feature Groups
+
+The following are removed from feature engineering, selection, training, and inference:
+
+- Training interaction features (`training_*`, `total_training_sessions`, etc.)
+- NPS features (`nps_score` and related derivatives)
+
+## 🔄 Before vs After Feature Set (Key Changes)
+
+| Category | Before | After |
+|---|---|---|
+| NPS signals | `nps_score` used | Removed |
+| Training signals | `training_sessions_attended` / `total_training_sessions` used | Removed |
+| Allocation signals | Aggregate utilization/expiry only | + rolling windows + expiry rate-of-change + prioritized raw aggregates |
+| Product usage trend | Binary decline flag | Ordinal encoded `usage_trend_30d` + `module_adoption_pct` retained |
+| Support signals | Ticket counts + breach rate | + `resolution_time_hours`, `escalation_count`, `sla_met` |
+| Interactions | None | `utilization_x_module_adoption`, `escalation_x_sla_met` |
+
+## 📈 Why the Business-Critical Features Matter
+
+- **Utilization and credit expiry** indicate product-value realization and waste risk.
+- **Session duration and module adoption** capture depth and breadth of platform usage.
+- **Usage trend** captures acceleration/decline in engagement momentum.
+- **Resolution time, escalations, SLA compliance** quantify support friction, a strong churn precursor.
+
+---
+
 ## 🛠️ Tech Stack
 
 - **ML**: XGBoost, LightGBM, scikit-learn, imbalanced-learn, SHAP, Optuna
