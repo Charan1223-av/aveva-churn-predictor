@@ -14,6 +14,7 @@ import pandas as pd
 import xgboost as xgb
 from imblearn.over_sampling import SMOTE
 from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import RandomOverSampler
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.inspection import permutation_importance
@@ -38,6 +39,8 @@ from src.features.feature_policy import (
 logger = logging.getLogger(__name__)
 
 class ChurnModelTrainer:
+    SHAP_SAMPLE_SIZE = 300
+
     def __init__(self, config: dict, model_output_dir: str = "models"):
         self.config = config
         self.output_dir = Path(model_output_dir)
@@ -95,12 +98,15 @@ class ChurnModelTrainer:
             base_model = LogisticRegression(**clean_params, random_state=seed)
 
         model = CalibratedClassifierCV(base_model, method="isotonic", cv=3)
-        k = max(1, min(3, n_minority - 1))
-        smote = SMOTE(random_state=seed, k_neighbors=k)
+        if n_minority < 2:
+            sampler = RandomOverSampler(random_state=seed)
+        else:
+            k = max(1, min(3, n_minority - 1))
+            sampler = SMOTE(random_state=seed, k_neighbors=k)
 
         return ImbPipeline([
             ("preprocessor", preprocessor),
-            ("smote", smote),
+            ("smote", sampler),
             ("classifier", model),
         ])
 
@@ -178,9 +184,14 @@ class ChurnModelTrainer:
             pipeline = self._build_pipeline(preprocessor, algorithm, params, n_minority=n_minority)
             pipeline.fit(X_train, y_train)
 
-            start = time.perf_counter()
             y_prob = pipeline.predict_proba(X_test)[:, 1]
-            inference_time_ms_per_sample = ((time.perf_counter() - start) * 1000) / max(len(X_test), 1)
+            latency_batch = X_test.head(min(100, len(X_test)))
+            if len(latency_batch) == 0:
+                inference_time_ms_per_sample = 0.0
+            else:
+                start = time.perf_counter()
+                _ = pipeline.predict_proba(latency_batch)
+                inference_time_ms_per_sample = ((time.perf_counter() - start) * 1000) / max(len(latency_batch), 1)
             threshold = self.find_optimal_threshold(y_test.values, y_prob)
             y_pred = (y_prob >= threshold).astype(int)
 
@@ -312,7 +323,7 @@ class ChurnModelTrainer:
             x_test_tf = preprocessor.transform(X_test)
             if hasattr(x_test_tf, "toarray"):
                 x_test_tf = x_test_tf.toarray()
-            shap_sample = x_test_tf[: min(300, len(x_test_tf))]
+            shap_sample = x_test_tf[: min(self.SHAP_SAMPLE_SIZE, len(x_test_tf))]
             explainer = shap.Explainer(rf, shap_sample)
             shap_values = explainer(shap_sample, check_additivity=False)
             shap_raw_values = shap_values.values

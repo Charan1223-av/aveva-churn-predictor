@@ -13,6 +13,7 @@ from src.features.feature_policy import USAGE_TREND_ORDINAL_MAP
 
 logger = logging.getLogger(__name__)
 SNAPSHOT_DATE = pd.Timestamp("2025-12-31")
+EPSILON_DIVISION = 1e-9
 
 
 def _trend_slope(series: pd.Series) -> float:
@@ -85,11 +86,9 @@ class FeatureStore:
         df = df.sort_values(["customer_id", "allocation_period"])
 
         agg = df.groupby("customer_id").agg(
-            utilization_rate_period=("utilization_rate_period", "mean"),
             avg_utilization_rate=("utilization_rate_period", "mean"),
             min_utilization_rate=("utilization_rate_period", "min"),
             std_utilization_rate=("utilization_rate_period", "std"),
-            credits_expired=("credits_expired", "sum"),
             credits_expired_total=("credits_expired", "sum"),
             credits_rolled_over_total=("credits_rolled_over", "sum"),
             top_up_count=("top_up_credits", lambda x: (x > 0).sum()),
@@ -109,7 +108,7 @@ class FeatureStore:
             v = g["utilization_rate_period"].values
             if len(v) < 6:
                 return 1.0
-            return v[-3:].mean() / (v[:3].mean() + 1e-9)
+            return v[-3:].mean() / (v[:3].mean() + EPSILON_DIVISION)
 
         rr = (df.groupby("customer_id").apply(recency_ratio)
                 .reset_index().rename(columns={0: "utilization_recency_ratio"}))
@@ -132,7 +131,7 @@ class FeatureStore:
             .apply(
                 lambda s: 0.0
                 if len(s) < 2
-                else float((s.iloc[-1] - s.iloc[0]) / (abs(s.iloc[0]) + 1e-9))
+                else float((s.iloc[-1] - s.iloc[0]) / (abs(s.iloc[0]) + EPSILON_DIVISION))
             )
             .reset_index()
             .rename(columns={"credits_expired": "credits_expired_rate_change"})
@@ -140,6 +139,8 @@ class FeatureStore:
         agg = agg.merge(roll3, on="customer_id", how="left")
         agg = agg.merge(roll6, on="customer_id", how="left")
         agg = agg.merge(roc, on="customer_id", how="left")
+        agg["utilization_rate_period"] = agg["avg_utilization_rate"]
+        agg["credits_expired"] = agg["credits_expired_total"]
         agg["credit_expiry_rate"] = agg["credits_expired_total"] / agg["total_credits_purchased"].clip(lower=1)
         return agg
 
@@ -182,7 +183,7 @@ class FeatureStore:
             v = g["total_credits"].values
             if len(v) < 6:
                 return 1.0
-            return v[-3:].mean() / (v[:3].mean() + 1e-9)
+            return v[-3:].mean() / (v[:3].mean() + EPSILON_DIVISION)
 
         cr = (monthly.groupby("customer_id").apply(crr)
                      .reset_index().rename(columns={0: "consumption_recency_ratio"}))
@@ -245,7 +246,6 @@ class FeatureStore:
             p1_count=("severity", lambda x: (x == "P1").sum()),
             p2_count=("severity", lambda x: (x == "P2").sum()),
             sla_breach_rate=("sla_met", lambda x: (~x).mean()),
-            escalation_count=("escalation_count", "sum"),
             total_escalations=("escalation_count", "sum"),
             sla_met=("sla_met", lambda x: x.astype(bool).mean()),
             resolution_time_hours=("resolution_time_hours", "mean"),
@@ -262,6 +262,7 @@ class FeatureStore:
         ).reset_index()
 
         result = overall.merge(recent, on="customer_id", how="left").fillna(0)
+        result["escalation_count"] = result["total_escalations"]
         return result
 
     def _engagement_features(self) -> pd.DataFrame:
