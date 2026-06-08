@@ -29,28 +29,13 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold, cross_validate
+from src.features.feature_policy import (
+    EXCLUDED_FEATURES,
+    EXCLUDED_FEATURE_TOKENS,
+    PRIORITIZED_FEATURES,
+)
 
 logger = logging.getLogger(__name__)
-
-PRIORITIZED_FEATURES = [
-    "utilization_rate_period",
-    "credits_expired",
-    "avg_session_duration_min",
-    "module_adoption_pct",
-    "usage_trend_30d",
-    "resolution_time_hours",
-    "escalation_count",
-    "sla_met",
-]
-
-EXCLUDED_FEATURE_TOKENS = ("nps", "training")
-EXCLUDED_FEATURES = {
-    "nps_score",
-    "training_sessions_attended",
-    "training_users_participating",
-    "total_training_sessions",
-}
-
 
 class ChurnModelTrainer:
     def __init__(self, config: dict, model_output_dir: str = "models"):
@@ -130,7 +115,7 @@ class ChurnModelTrainer:
         )
 
         min_class_size = int(y.value_counts().min())
-        n_minority_per_fold = max(1, min_class_size - (min_class_size // n_splits))
+        n_minority_per_fold = max(1, (min_class_size * (n_splits - 1)) // n_splits)
         pipeline = self._build_pipeline(preprocessor, algorithm, params, n_minority=n_minority_per_fold)
 
         scoring = {
@@ -239,6 +224,30 @@ class ChurnModelTrainer:
         except Exception:
             return list(X_ref.columns)
 
+    @staticmethod
+    def _align_feature_names(feature_names: List[str], target_length: int) -> List[str]:
+        if len(feature_names) == target_length:
+            return feature_names
+        logger.warning(
+            "Feature name alignment mismatch: names=%s, target=%s. Applying fallback alignment.",
+            len(feature_names),
+            target_length,
+        )
+        if len(feature_names) > target_length:
+            return feature_names[:target_length]
+        padded = list(feature_names)
+        padded.extend([f"feature_{i}" for i in range(len(feature_names), target_length)])
+        return padded
+
+    @staticmethod
+    def _is_prioritized_feature_match(feature_name: str, prioritized_name: str) -> bool:
+        normalized = str(feature_name)
+        return (
+            normalized == prioritized_name
+            or normalized.endswith(f"__{prioritized_name}")
+            or normalized.endswith(f"_{prioritized_name}")
+        )
+
     def _save_feature_importance_artifacts(
         self,
         pipeline: ImbPipeline,
@@ -284,8 +293,12 @@ class ChurnModelTrainer:
             n_jobs=-1,
         )
         rf.fit(x_train_tf, y_train)
+        aligned_tree_names = self._align_feature_names(
+            transformed_feature_names,
+            len(rf.feature_importances_),
+        )
         tree_df = pd.DataFrame({
-            "feature": transformed_feature_names[: len(rf.feature_importances_)],
+            "feature": aligned_tree_names,
             "importance": rf.feature_importances_,
             "method": "tree_model_importance",
         })
@@ -306,8 +319,12 @@ class ChurnModelTrainer:
             if getattr(shap_raw_values, "ndim", 0) == 3:
                 shap_raw_values = shap_raw_values[:, :, -1]
             shap_importance = np.abs(shap_raw_values).mean(axis=0)
+            aligned_shap_names = self._align_feature_names(
+                transformed_feature_names,
+                len(shap_importance),
+            )
             shap_df = pd.DataFrame({
-                "feature": transformed_feature_names[: len(shap_importance)],
+                "feature": aligned_shap_names,
                 "importance": shap_importance,
                 "method": "shap",
             })
@@ -318,7 +335,10 @@ class ChurnModelTrainer:
             shap.summary_plot(
                 shap_raw_values,
                 shap_sample,
-                feature_names=transformed_feature_names[: shap_sample.shape[1]],
+                feature_names=self._align_feature_names(
+                    transformed_feature_names,
+                    shap_sample.shape[1],
+                ),
                 show=False,
             )
             plt.tight_layout()
@@ -329,15 +349,17 @@ class ChurnModelTrainer:
 
         combined = pd.concat(artifacts, ignore_index=True)
         combined["is_prioritized_feature"] = combined["feature"].apply(
-            lambda f: any(pf in str(f) for pf in PRIORITIZED_FEATURES)
+            lambda f: any(self._is_prioritized_feature_match(f, pf) for pf in PRIORITIZED_FEATURES)
         )
         combined.to_csv(output_dir / "feature_importance_rankings.csv", index=False)
 
         prioritized_summary = {}
         for feature in PRIORITIZED_FEATURES:
-            hits = combined[combined["feature"].str.contains(feature, case=False, na=False)]
+            hits = combined[
+                combined["feature"].apply(lambda f: self._is_prioritized_feature_match(f, feature))
+            ]
             prioritized_summary[feature] = {
-                "present_in_model_features": bool((X_train.columns == feature).any()),
+                "present_in_model_features": bool(feature in X_train.columns),
                 "methods_available": sorted(hits["method"].unique().tolist()),
                 "mean_importance": float(hits["importance"].mean()) if not hits.empty else 0.0,
             }

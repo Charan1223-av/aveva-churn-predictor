@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.stats import linregress
 from typing import Dict
+from src.features.feature_policy import USAGE_TREND_ORDINAL_MAP
 
 logger = logging.getLogger(__name__)
 SNAPSHOT_DATE = pd.Timestamp("2025-12-31")
@@ -145,16 +146,15 @@ class FeatureStore:
     def _consumption_features(self) -> pd.DataFrame:
         df = self.tables["fact_flex_consumption"].copy()
         df = df.sort_values(["customer_id", "consumption_month"])
+        if "avg_session_duration_min" not in df.columns:
+            df["avg_session_duration_min"] = 0.0
 
         monthly = df.groupby(["customer_id", "consumption_month"]).agg(
             total_credits=("credits_consumed", "sum"),
             distinct_users=("distinct_users", "sum"),
             products_used=("product_name", "nunique"),
             error_count=("error_count", "sum"),
-            avg_session_duration_min=(
-                "avg_session_duration_min",
-                "mean",
-            ) if "avg_session_duration_min" in df.columns else ("credits_consumed", lambda x: 0.0),
+            avg_session_duration_min=("avg_session_duration_min", "mean"),
         ).reset_index()
 
         agg = monthly.groupby("customer_id").agg(
@@ -192,14 +192,20 @@ class FeatureStore:
     def _product_features(self) -> pd.DataFrame:
         df = self.tables["fact_product_usage"].copy()
         df = df.sort_values(["customer_id", "snapshot_month"])
+        if "usage_trend_30d" not in df.columns:
+            df["usage_trend_30d"] = "Stable"
 
         monthly = df.groupby(["customer_id", "snapshot_month"]).agg(
             avg_adoption_rate=("adoption_rate", "mean"),
             module_adoption_pct=("module_adoption_pct", "mean"),
-            usage_trend_30d=("usage_trend_30d", "last") if "usage_trend_30d" in df.columns else ("adoption_rate", lambda x: "Stable"),
+            usage_trend_30d=("usage_trend_30d", "last"),
         ).reset_index()
-        trend_map = {"Declining": 0, "Stable": 1, "Growing": 2, "New": 3}
-        monthly["usage_trend_30d"] = monthly["usage_trend_30d"].map(trend_map).fillna(1).astype(int)
+        monthly["usage_trend_30d"] = (
+            monthly["usage_trend_30d"]
+            .map(USAGE_TREND_ORDINAL_MAP)
+            .fillna(USAGE_TREND_ORDINAL_MAP["Stable"])
+            .astype(int)
+        )
 
         agg = monthly.groupby("customer_id").agg(
             avg_adoption_rate=("avg_adoption_rate", "mean"),
@@ -229,7 +235,7 @@ class FeatureStore:
         if "resolution_time_hours" not in df.columns:
             resolved = pd.to_datetime(df.get("resolved_date"), errors="coerce")
             created = pd.to_datetime(df.get("created_date"), errors="coerce")
-            df["resolution_time_hours"] = (resolved - created).dt.total_seconds().div(3600).fillna(0)
+            df["resolution_time_hours"] = (resolved - created).dt.total_seconds().div(3600)
 
         cutoff_3m = SNAPSHOT_DATE - pd.Timedelta(days=90)
         df_recent = df[df["created_date"] >= cutoff_3m]

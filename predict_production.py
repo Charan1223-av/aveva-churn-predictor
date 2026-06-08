@@ -18,6 +18,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from src.data.loader import DataLoader
 from src.features.feature_store import FeatureStore
+from src.features.feature_policy import EXCLUDED_FEATURE_TOKENS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -88,11 +89,14 @@ def main():
     drop_cols = config["features"]["drop_columns"] + ["customer_name", "country"]
     drop_cols = [c for c in drop_cols if c in feature_store.columns]
     X = feature_store.drop(columns=[c for c in drop_cols if c in feature_store.columns], errors="ignore")
-    X = X[[c for c in X.columns if "nps" not in c.lower() and "training" not in c.lower()]]
+    X = X[[c for c in X.columns if not any(token in c.lower() for token in EXCLUDED_FEATURE_TOKENS)]]
 
     # Keep only columns the model was trained on
     trained_features = metadata["features"]
-    excluded_trained = [c for c in trained_features if "nps" in c.lower() or "training" in c.lower()]
+    excluded_trained = [
+        c for c in trained_features
+        if any(token in c.lower() for token in EXCLUDED_FEATURE_TOKENS)
+    ]
     if excluded_trained:
         logger.warning(
             "Loaded model still expects excluded features (NPS/training). "
